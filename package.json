@@ -1,0 +1,13 @@
+{
+  "name": "courtside-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A dependency-free local NBA scoreboard with budget-aware caching.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check lib/data.js && node --check lib/logos.js && node --check public/app.js"
+  }
+}

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101619">
+  <title>Courtside | NBA, at a glance</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Courtside home"><span class="ball" aria-hidden="true">&#127936;</span> COURTSIDE<span class="brand-dot">.</span></a>
+      <div class="sidebar-label">YOUR FRONT ROW SEAT</div>
+      <nav class="navigation" aria-label="Main navigation">
+        <button class="nav-button active" data-view="scores"><span aria-hidden="true">&#9638;</span> Scoreboard</button>
+        <button class="nav-button" data-view="schedule"><span aria-hidden="true">&#9634;</span> Team schedule</button>
+        <button class="nav-button" data-view="favorite"><span aria-hidden="true">&#9734;</span> My team</button>
+        <button class="nav-button" data-view="standings"><span aria-hidden="true">&#9776;</span> Standings</button>
+      </nav>
+      <section class="favorite-settings">
+        <label class="sidebar-label" for="favorite-team">YOUR FAVORITE TEAM</label>
+        <select id="favorite-team" disabled><option value="">Loading teams...</option></select>
+        <p id="favorite-hint">Pick your team. We'll keep them close.</p>
+      </section>
+      <div class="sidebar-bottom">
+        <div class="connection"><span class="connection-dot"></span> LOCAL. LIGHTWEIGHT. LIVE.</div>
+        <p>No account. No API key.<br>Just the game.</p>
+        <a href="https://www.espn.com/nba/" target="_blank" rel="noreferrer">Data via ESPN &nearr;</a>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar"><span>THE NATIONAL BASKETBALL ASSOCIATION</span><span id="today-label"></span></header>
+      <section class="page-heading">
+        <div><p class="eyebrow">EVERY GAME. EVERY NIGHT.</p><h1 id="page-title">Around the league<span>.</span></h1>
+          <p id="page-description">The scores you came for. The matchups you don't want to miss.</p>
+        </div>
+        <div class="live-badge"><span></span> AUTO-UPDATING</div>
+      </section>
+      <section class="favorite-banner" id="favorite-banner">
+        <div class="team-mark" id="favorite-mark" aria-hidden="true">&#9734;</div>
+        <div><p class="eyebrow">MAKE IT PERSONAL</p><h2 id="favorite-title">Your team. Front and center.</h2><p id="favorite-detail">Choose a favorite in the sidebar to follow their season.</p></div>
+        <button id="favorite-action" class="outline-button">Choose a team <span aria-hidden="true">&rarr;</span></button>
+      </section>
+      <section class="toolbar" aria-label="Game controls">
+        <div class="date-controls" id="date-controls">
+          <button class="icon-button" id="previous-day" aria-label="Previous day">&larr;</button>
+          <label class="sr-only" for="game-date">NBA game date (Eastern Time)</label>
+          <input type="date" id="game-date" min="2000-01-01" max="2100-12-31">
+          <button class="icon-button" id="next-day" aria-label="Next day">&rarr;</button>
+          <button class="text-button" id="today-button">Today</button>
+        </div>
+        <div class="season-controls" id="season-controls" hidden>
+          <label for="schedule-team" id="schedule-team-label">Team</label><select id="schedule-team" disabled><option value="">Loading teams...</option></select>
+          <label for="season">Season</label><select id="season"></select>
+          <label for="phase" id="phase-label">Phase</label><select id="phase"><option value="1">Preseason</option><option value="2" selected>Regular season</option><option value="3">Postseason</option></select>
+        </div>
+        <div class="segmented" id="game-filters" role="group" aria-label="Filter games">
+          <button class="selected" data-filter="all" aria-pressed="true">All games</button>
+          <button data-filter="live" aria-pressed="false">Live <span class="tiny-dot"></span></button>
+          <button data-filter="final" aria-pressed="false">Results</button>
+          <button data-filter="scheduled" aria-pressed="false">Upcoming</button>
+        </div>
+        <div class="segmented" id="standings-tabs" role="group" aria-label="Standings view" hidden>
+          <button data-standings-view="regular" class="selected" aria-pressed="true">Standings</button>
+          <button data-standings-view="playoffs" aria-pressed="false">Playoffs</button>
+        </div>
+      </section>
+      <div class="section-heading"><h2 id="games-heading">Today's matchups</h2><span id="game-count"></span></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <section id="games" class="game-grid" aria-label="NBA games" aria-busy="true"></section>
+      <section id="standings" class="standings-grid" aria-label="NBA conference standings" aria-busy="false" hidden></section>
+      <section id="playoffs" class="playoff-bracket" aria-label="NBA playoff bracket" aria-busy="false" hidden></section>
+      <section class="empty-state" id="empty-state" hidden><span aria-hidden="true">&#9678;</span><h2 id="empty-title">No games on the board</h2><p id="empty-description">Try another date or filter.</p></section>
+      <footer>
+        <div><span class="cache-dot"></span><span id="refresh-status" role="status">Connecting to the court...</span><span id="updated-at"></span></div>
+        <div class="usage"><span id="usage-label">Checking API budget...</span><meter id="usage-meter" min="0" max="300" value="0" aria-label="Daily API request usage"></meter></div>
+        <p>Game dates follow US Eastern Time. Tip-off times are local to you. ESPN's unofficial public feed may be delayed or unavailable.</p>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
