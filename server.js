@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { DataError, NbaData, nbaDate } from './lib/data.js';
-import { TeamLogos } from './lib/logos.js';
+import { PlayerHeadshots, TeamLogos } from './lib/logos.js';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const assets = new Map([
@@ -12,7 +12,8 @@ const assets = new Map([
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
 ]);
 
-export function createApp(data, logos = new TeamLogos({ cacheDirectory: resolve(root, '.cache', 'logos') })) {
+export function createApp(data, logos = new TeamLogos({ cacheDirectory: resolve(root, '.cache', 'logos') }),
+  headshots = new PlayerHeadshots({ cacheDirectory: resolve(root, '.cache', 'headshots') })) {
   return createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -24,12 +25,12 @@ export function createApp(data, logos = new TeamLogos({ cacheDirectory: resolve(
         res.setHeader('Allow', 'GET, HEAD');
         throw new DataError('Method not allowed.', 405);
       }
-      const logoMatch = /^\/logos\/([a-z]+)\.png$/.exec(url.pathname);
-      if (logoMatch) {
-        const body = await logos.load(logoMatch[1]);
+      const image = /^\/(logos|headshots)\/([a-z\d]+)\.png$/.exec(url.pathname);
+      if (image) {
+        const body = await (image[1] === 'logos' ? logos : headshots).load(image[2]);
         res.writeHead(200, {
           'Content-Type': 'image/png',
-          'Cache-Control': 'public, max-age=604800',
+          'Cache-Control': `public, max-age=${image[1] === 'logos' ? 604800 : 2592000}`,
           'Content-Length': body.length,
         });
         res.end(req.method === 'HEAD' ? undefined : body);
@@ -46,6 +47,11 @@ export function createApp(data, logos = new TeamLogos({ cacheDirectory: resolve(
         result = await data.standings(url.searchParams.get('season') || '');
       } else if (url.pathname === '/api/playoffs') {
         result = await data.playoffs(url.searchParams.get('season') || '');
+      } else if (url.pathname === '/api/players') {
+        result = await data.players(url.searchParams.get('team') || '', url.searchParams.get('season') || '',
+          url.searchParams.get('phase') || '2');
+      } else if (url.pathname === '/api/recent') {
+        result = await data.recent(url.searchParams.get('team') || '', url.searchParams.get('season') || '');
       } else if (url.pathname === '/api/usage') result = data.usage();
       else {
         const asset = assets.get(url.pathname);

@@ -13,11 +13,13 @@ function easternToday() {
 
 let storageWarning = '';
 let savedTeam = '';
+let savedMotion = 'on';
 try {
   savedTeam = localStorage.getItem('courtside-favorite') || '';
+  savedMotion = localStorage.getItem('courtside-motion') || 'on';
 } catch (error) {
   console.warn('Favorite storage unavailable:', error);
-  storageWarning = 'Browser storage is unavailable. Your favorite will only be saved for this visit.';
+  storageWarning = 'Browser storage is unavailable. Your preferences will only be saved for this visit.';
 }
 
 const now = new Date();
@@ -25,7 +27,7 @@ const defaultSeason = now.getFullYear() + (now.getMonth() >= 6 ? 1 : 0);
 const state = {
   view: 'scores', filter: 'all', date: easternToday(), favorite: savedTeam,
   team: savedTeam, season: String(defaultSeason), phase: '2', teams: [], games: [], conferences: [],
-  standingsView: 'regular', playoffs: null,
+  standingsView: 'regular', playoffs: null, scoreChanges: new Set(),
   meta: null, requestId: 0, loading: false, error: '', teamError: '', retryAt: 0,
 };
 let timer;
@@ -34,6 +36,75 @@ let requestController;
 let teamsPromise;
 let teamsRetryAt = 0;
 const localResponses = new Map();
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+let revealObserver;
+let rosterObserver;
+let lastPresentation = '';
+
+function motionEnabled() {
+  return savedMotion !== 'off' && !reducedMotion.matches;
+}
+
+function updateMotion() {
+  const enabled = motionEnabled();
+  document.documentElement.classList.toggle('motion-paused', !enabled);
+  const toggle = $('#motion-toggle');
+  toggle.textContent = reducedMotion.matches ? 'Motion: reduced by system' : `Motion: ${enabled ? 'on' : 'off'}`;
+  toggle.setAttribute('aria-pressed', String(enabled));
+  toggle.disabled = reducedMotion.matches;
+  toggle.title = reducedMotion.matches ? 'Your system prefers reduced motion.' : 'Toggle decorative animations. Scores still refresh when motion is off.';
+  if (!enabled) {
+    revealObserver?.disconnect();
+    rosterObserver?.disconnect();
+    document.getAnimations().forEach((animation) => animation.cancel());
+  }
+}
+
+function animateContent() {
+  revealObserver?.disconnect();
+  if (state.loading) return;
+  const presentation = `${pathForView()}:${state.filter}:${state.favorite}`;
+  if (presentation === lastPresentation) return;
+  lastPresentation = presentation;
+  if (!motionEnabled()) return;
+  const container = state.view === 'standings'
+    ? $(state.standingsView === 'playoffs' ? '#playoffs' : '#standings') : $('#games');
+  const cards = [...container.querySelectorAll('.game-card, tbody tr, .series-card, .champion-banner')];
+  const indexes = new Map(cards.map((card, index) => [card, index]));
+  revealObserver = new IntersectionObserver((entries, observer) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      observer.unobserve(entry.target);
+      if (!motionEnabled()) continue;
+      entry.target.animate([
+        { opacity: 0, transform: 'translateY(18px) scale(.98)' },
+        { opacity: 1, transform: 'translateY(0) scale(1)' },
+      ], {
+        duration: 440, delay: Math.min(indexes.get(entry.target) % 8, 5) * 45,
+        easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards',
+      });
+    }
+  }, { threshold: 0.06 });
+  cards.forEach((card) => revealObserver.observe(card));
+}
+
+$('#motion-toggle').addEventListener('click', () => {
+  savedMotion = savedMotion === 'off' ? 'on' : 'off';
+  try {
+    localStorage.setItem('courtside-motion', savedMotion);
+  } catch (error) {
+    console.warn('Could not save motion preference:', error);
+    storageWarning = 'Your browser could not save your motion preference. It applies for this visit only.';
+    renderNotice();
+  }
+  updateMotion();
+  if (motionEnabled()) {
+    lastPresentation = '';
+    animateContent();
+  }
+});
+reducedMotion.addEventListener('change', updateMotion);
+updateMotion();
 
 function node(tag, className = '', text = '') {
   const element = document.createElement(tag);
@@ -82,7 +153,12 @@ function renderUsage(usage) {
   $('#usage-label').textContent = `${usage.used} / ${usage.limit} API calls today (UTC)`;
   $('#usage-meter').max = usage.limit;
   $('#usage-meter').value = usage.used;
-  $('#usage-meter').title = `${usage.remaining} requests left. Shared across all tabs; cached reads use none.`;
+  const kinds = Object.entries(usage.byKind || {}).sort((a, b) => b[1] - a[1])
+    .map(([kind, count]) => `${kind} ${count}`).join(', ');
+  $('#usage-meter').title = `${usage.remaining} requests left. Shared across all tabs; cached reads use none.${kinds ? ` Today: ${kinds}.` : ''}`;
+  if (usage.ttlScale > 1) {
+    $('#usage-label').textContent += ` \u00b7 saver mode: caches last ${usage.ttlScale}\u00d7 longer`;
+  }
 }
 
 function selectedTeam() {
@@ -184,6 +260,10 @@ function teamRow(team, game) {
   info.append(name, node('span', 'team-record', team.record || team.abbreviation));
   const score = node('span', `team-score${team.winner ? ' winner' : ''}`,
     game.state === 'scheduled' || team.score === null ? '\u2014' : String(team.score));
+  if (state.scoreChanges.has(`${game.id}:${team.id}`)) {
+    score.classList.add('score-changed');
+    score.title = 'Score updated';
+  }
   row.append(teamLogo(team), info, score);
   return row;
 }
@@ -246,12 +326,18 @@ function renderStandings() {
         const row = node('tr', team.id === state.favorite ? 'favorite-standing' : '');
         const name = node('th', 'standings-team');
         name.scope = 'row';
-        const identity = node('span', 'standings-identity');
+        const identity = node('button', 'standings-identity history-trigger');
+        identity.type = 'button';
+        identity.dataset.team = team.id;
+        identity.setAttribute('aria-expanded', 'false');
+        identity.setAttribute('aria-controls', 'team-history');
+        identity.setAttribute('aria-label', `${team.name}: show last ${RECENT_GAMES} games`);
         identity.append(teamLogo(team), node('span', 'standings-name', team.shortName));
         if (team.id === state.favorite) {
           const star = node('span', 'favorite-star', '\u2605');
-          star.setAttribute('aria-label', 'Favorite team');
+          star.setAttribute('aria-hidden', 'true');
           identity.append(star);
+          identity.setAttribute('aria-label', `${team.name}, your favorite: show last ${RECENT_GAMES} games`);
         }
         name.append(identity);
         row.append(node('td', 'standing-rank', String(team.rank ?? index + 1)), name,
@@ -268,8 +354,293 @@ function renderStandings() {
     $('#empty-title').textContent = 'Standings are unavailable';
     $('#empty-description').textContent = 'Check the message above or try another season. We will retry automatically.';
   }
+  syncHistoryAnchor();
   renderNotice();
 }
+
+const RECENT_GAMES = 20;
+const historyDate = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
+const historyResponses = new Map();
+const historyRequests = new Map();
+const historyCard = {
+  team: '', season: '', anchor: null, showTimer: 0, hideTimer: 0, frame: 0,
+  error: '', pointerType: '', suppressFocus: false,
+};
+
+function historyPath(team) {
+  return `/api/recent?team=${encodeURIComponent(team)}&season=${state.season}`;
+}
+
+function historyPanel() {
+  let panel = $('#team-history');
+  if (!panel) {
+    panel = node('section', 'team-history');
+    panel.id = 'team-history';
+    panel.hidden = true;
+    panel.setAttribute('role', 'region');
+    panel.addEventListener('pointerenter', () => clearTimeout(historyCard.hideTimer));
+    panel.addEventListener('pointerleave', (event) => {
+      if (event.pointerType === 'mouse') scheduleHistoryHide();
+    });
+    panel.addEventListener('focusout', (event) => {
+      if (!panel.contains(event.relatedTarget) && event.relatedTarget !== historyCard.anchor) hideHistory();
+    });
+    document.body.append(panel);
+  }
+  return panel;
+}
+
+function positionHistory() {
+  cancelAnimationFrame(historyCard.frame);
+  historyCard.frame = requestAnimationFrame(() => {
+    const panel = $('#team-history');
+    if (!panel || panel.hidden || !historyCard.anchor?.isConnected) return;
+    const gap = 10;
+    const anchor = historyCard.anchor.getBoundingClientRect();
+    const width = panel.offsetWidth;
+    const height = panel.offsetHeight;
+    const roomRight = innerWidth - anchor.right - gap;
+    let left;
+    let top;
+    if (roomRight >= width + 8) {
+      left = anchor.right + gap;
+      top = anchor.top + anchor.height / 2 - height / 2;
+      panel.dataset.side = 'right';
+    } else {
+      left = anchor.left;
+      const below = innerHeight - anchor.bottom - gap;
+      top = below >= height || below >= anchor.top ? anchor.bottom + gap : anchor.top - gap - height;
+      panel.dataset.side = 'below';
+    }
+    panel.style.left = `${Math.round(Math.max(8, Math.min(left, innerWidth - width - 8)))}px`;
+    panel.style.top = `${Math.round(Math.max(8, Math.min(top, innerHeight - height - 8)))}px`;
+  });
+}
+
+function historyRow(game) {
+  const row = node('tr', `history-${game.result === 'W' ? 'win' : 'loss'}`);
+  const date = node('td', 'history-date', historyDate.format(new Date(game.date)));
+  if (game.phase === '3') date.append(node('span', 'history-tag', 'PO'));
+  const opponent = node('td');
+  const matchup = node('span', 'history-opponent');
+  const versus = node('span', 'history-versus', game.home ? 'vs' : '@');
+  opponent.title = `${game.home ? 'vs' : 'at'} ${game.opponent.name}${game.phase === '3' ? ' \u00b7 Playoffs' : ''}`;
+  matchup.append(versus, teamLogo(game.opponent), node('span', '', game.opponent.abbreviation));
+  opponent.append(matchup);
+  const result = node('td', 'history-result');
+  result.append(node('span', `result-pill ${game.result === 'W' ? 'win' : 'loss'}`, game.result));
+  const score = node('td', 'history-score', `${game.teamScore}\u2013${game.opponentScore}`);
+  const periods = node('td', `history-time${game.overtime ? ' overtime' : ''}`,
+    game.overtime ? `${game.overtime > 1 ? game.overtime : ''}OT` : 'Reg');
+  periods.title = game.overtime
+    ? `${game.overtime} overtime period${game.overtime > 1 ? 's' : ''}` : 'Regulation (48 minutes)';
+  row.append(date, opponent, result, score, periods);
+  return row;
+}
+
+function renderHistory() {
+  const panel = historyPanel();
+  const team = state.teams.find((item) => item.id === historyCard.team)
+    || state.conferences.flatMap((conference) => conference.teams).find((item) => item.id === historyCard.team);
+  if (!team) return;
+  const path = historyPath(team.id);
+  const data = historyResponses.get(path);
+  const request = historyRequests.get(path);
+  panel.setAttribute('aria-label', `${team.name}: last ${RECENT_GAMES} games`);
+  panel.setAttribute('aria-busy', String(Boolean(request && !data)));
+  const header = node('header', 'history-header');
+  const titles = node('div', 'history-titles');
+  titles.append(node('span', 'eyebrow', `LAST ${RECENT_GAMES} GAMES`), node('strong', '', team.name));
+  header.append(teamLogo(team), titles);
+  const content = [header];
+  if (data?.games.length) {
+    const overtime = data.games.filter((game) => game.overtime).length;
+    const streakResult = data.games[0].result;
+    const streak = data.games.findIndex((game) => game.result !== streakResult);
+    const summary = node('div', 'history-summary');
+    summary.id = 'team-history-summary';
+    summary.setAttribute('aria-label', `Last ${data.games.length}: ${data.wins} wins, ${data.losses} losses, ${streakResult === 'W' ? 'won' : 'lost'} ${streak === -1 ? data.games.length : streak} straight, ${overtime} overtime ${overtime === 1 ? 'game' : 'games'}`);
+    summary.append(
+      node('span', 'history-record', `${data.wins}\u2013${data.losses}`),
+      node('span', '', `${streakResult}${streak === -1 ? data.games.length : streak} streak`),
+      node('span', '', `${overtime} OT ${overtime === 1 ? 'game' : 'games'}`),
+    );
+    const form = node('div', 'history-form');
+    form.setAttribute('aria-hidden', 'true');
+    form.title = 'Oldest to newest';
+    [...data.games].reverse().forEach((game, index) => {
+      const dot = node('span', `form-dot ${game.result === 'W' ? 'win' : 'loss'}`);
+      dot.style.setProperty('--i', index);
+      form.append(dot);
+    });
+    const scroller = node('div', 'history-scroll');
+    const table = node('table', 'history-table');
+    table.append(node('caption', 'sr-only',
+      `${team.name}: last ${data.games.length} completed games, newest first. Score is ${team.abbreviation} first.`));
+    const head = node('thead');
+    const headings = node('tr');
+    for (const label of ['Date', 'Opponent', 'W/L', 'Score', 'Time']) {
+      const cell = node('th', '', label);
+      cell.scope = 'col';
+      headings.append(cell);
+    }
+    head.append(headings);
+    const body = node('tbody');
+    body.append(...data.games.map(historyRow));
+    table.append(head, body);
+    scroller.append(table);
+    content.push(summary, form, scroller);
+    if (data.games.length < RECENT_GAMES && !data.meta.warning) {
+      content.push(node('p', 'history-note', `Only ${data.games.length} completed games are available so far.`));
+    }
+  } else if (data) {
+    content.push(node('p', 'history-note', 'No completed games yet for this team.'));
+  } else if (request) {
+    const loading = node('div', 'history-loading');
+    for (let i = 0; i < 5; i += 1) loading.append(node('span', 'history-skeleton'));
+    content.push(loading);
+  }
+  const problem = historyCard.error || data?.meta.warning;
+  if (problem) content.push(node('p', 'history-warning', problem));
+  if (data) {
+    content.push(node('p', 'history-source',
+      `Score shows ${team.abbreviation} first \u00b7 PO = playoffs \u00b7 Updated ${timeFormatter.format(new Date(data.meta.fetchedAt))}`));
+  }
+  panel.replaceChildren(...content);
+  positionHistory();
+}
+
+async function loadHistory(team) {
+  const path = historyPath(team);
+  const cached = historyResponses.get(path);
+  historyCard.error = '';
+  if (cached && !cached.meta.stale && cached.meta.expiresAt > Date.now()) return;
+  if (cached && cached.meta.retryAt > Date.now()) return;
+  if (historyRequests.has(path)) return;
+  const request = api(path);
+  historyRequests.set(path, request);
+  if (historyCard.team === team) renderHistory();
+  try {
+    const result = await request;
+    historyResponses.delete(path);
+    historyResponses.set(path, result);
+    while (historyResponses.size > 40) historyResponses.delete(historyResponses.keys().next().value);
+    renderUsage(result.meta.usage);
+  } catch (error) {
+    console.error('Unable to load recent games:', error);
+    if (historyCard.team === team) historyCard.error = `${error.message} Hover again in a minute.`;
+  } finally {
+    historyRequests.delete(path);
+    if (historyCard.team === team && !$('#team-history').hidden) renderHistory();
+  }
+}
+
+function showHistory(anchor) {
+  clearTimeout(historyCard.showTimer);
+  clearTimeout(historyCard.hideTimer);
+  if (historyCard.anchor && historyCard.anchor !== anchor) historyCard.anchor.setAttribute('aria-expanded', 'false');
+  const panel = historyPanel();
+  const changed = historyCard.team !== anchor.dataset.team || panel.hidden;
+  historyCard.anchor = anchor;
+  historyCard.team = anchor.dataset.team;
+  historyCard.season = state.season;
+  anchor.setAttribute('aria-expanded', 'true');
+  anchor.setAttribute('aria-describedby', 'team-history-summary');
+  panel.hidden = false;
+  if (changed) historyCard.error = '';
+  renderHistory();
+  if (changed && motionEnabled()) {
+    panel.animate([
+      { opacity: 0, transform: 'translateY(6px) scale(.97)' },
+      { opacity: 1, transform: 'translateY(0) scale(1)' },
+    ], { duration: 200, easing: 'cubic-bezier(.2,.8,.2,1)' });
+  }
+  void loadHistory(historyCard.team);
+}
+
+function hideHistory() {
+  clearTimeout(historyCard.showTimer);
+  clearTimeout(historyCard.hideTimer);
+  const panel = $('#team-history');
+  if (panel) panel.hidden = true;
+  historyCard.anchor?.setAttribute('aria-expanded', 'false');
+  historyCard.anchor?.removeAttribute('aria-describedby');
+  historyCard.anchor = null;
+  historyCard.team = '';
+}
+
+function scheduleHistoryHide() {
+  clearTimeout(historyCard.showTimer);
+  clearTimeout(historyCard.hideTimer);
+  historyCard.hideTimer = setTimeout(hideHistory, 180);
+}
+
+function syncHistoryAnchor() {
+  if (!historyCard.team) return;
+  const anchor = [...document.querySelectorAll('#standings .history-trigger')]
+    .find((button) => button.dataset.team === historyCard.team);
+  if (anchor && historyCard.season === state.season
+    && state.view === 'standings' && state.standingsView === 'regular') {
+    historyCard.anchor = anchor;
+    anchor.setAttribute('aria-expanded', 'true');
+    anchor.setAttribute('aria-describedby', 'team-history-summary');
+    positionHistory();
+  } else hideHistory();
+}
+
+$('#standings').addEventListener('pointerover', (event) => {
+  const trigger = event.target.closest('.history-trigger');
+  if (!trigger || event.pointerType !== 'mouse') return;
+  clearTimeout(historyCard.hideTimer);
+  if (trigger === historyCard.anchor) return;
+  clearTimeout(historyCard.showTimer);
+  // A short intent delay avoids spending API budget while the pointer sweeps the table.
+  historyCard.showTimer = setTimeout(() => showHistory(trigger), historyCard.anchor ? 80 : 220);
+});
+$('#standings').addEventListener('pointerout', (event) => {
+  const trigger = event.target.closest('.history-trigger');
+  if (!trigger || event.pointerType !== 'mouse' || trigger.contains(event.relatedTarget)) return;
+  scheduleHistoryHide();
+});
+$('#standings').addEventListener('focusin', (event) => {
+  const trigger = event.target.closest('.history-trigger');
+  if (historyCard.suppressFocus) {
+    historyCard.suppressFocus = false;
+    return;
+  }
+  if (trigger && trigger.matches(':focus-visible')) showHistory(trigger);
+});
+$('#standings').addEventListener('focusout', (event) => {
+  if (!event.target.closest('.history-trigger')) return;
+  if (!event.relatedTarget || !$('#team-history')?.contains(event.relatedTarget)) {
+    if (event.relatedTarget?.closest?.('.history-trigger')) return;
+    scheduleHistoryHide();
+  }
+});
+$('#standings').addEventListener('click', (event) => {
+  const trigger = event.target.closest('.history-trigger');
+  if (!trigger) return;
+  // Taps and Enter/Space toggle; a mouse click keeps the hover card open.
+  if (historyCard.anchor === trigger && !$('#team-history').hidden && historyCard.pointerType !== 'mouse') hideHistory();
+  else showHistory(trigger);
+  historyCard.pointerType = '';
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !historyCard.anchor) return;
+  const anchor = historyCard.anchor;
+  hideHistory();
+  if (document.activeElement !== anchor) {
+    historyCard.suppressFocus = true;
+    anchor.focus({ preventScroll: true });
+  }
+});
+document.addEventListener('pointerdown', (event) => {
+  historyCard.pointerType = event.pointerType;
+  if (!historyCard.anchor || event.target.closest('.history-trigger, #team-history')) return;
+  hideHistory();
+});
+addEventListener('resize', positionHistory);
+addEventListener('scroll', positionHistory, { capture: true, passive: true });
 
 function seriesCard(series, label) {
   const card = node('article', `series-card${series?.winnerId ? ' series-complete' : ''}`);
@@ -303,6 +674,17 @@ function seriesCard(series, label) {
     row.append(wins);
     card.append(row);
   }
+  const progress = node('div', 'series-progress');
+  progress.setAttribute('aria-label', `Series progress: ${series.teams.map((team) => `${team.abbreviation} ${team.wins} wins`).join(', ')}`);
+  for (const team of series.teams) {
+    const track = node('span', `series-track${team.id === series.winnerId ? ' series-track-winner' : ''}`);
+    track.setAttribute('aria-hidden', 'true');
+    for (let win = 0; win < Math.ceil(series.bestOf / 2); win += 1) {
+      track.append(node('span', win < team.wins ? 'win-dot earned' : 'win-dot'));
+    }
+    progress.append(track);
+  }
+  card.append(progress);
   const details = node('div', 'series-detail');
   details.append(node('span', '', `Best of ${series.bestOf}`));
   const link = node('a', '', 'Details \u2197');
@@ -337,7 +719,9 @@ function renderPlayoffs() {
   }
   if (bracket.champion) {
     const champion = node('div', 'champion-banner');
-    champion.append(teamLogo(bracket.champion), node('div', '', `${bracket.champion.name} \u00b7 NBA Champions`));
+    const trophy = node('span', 'champion-trophy', '\u{1F3C6}');
+    trophy.setAttribute('aria-hidden', 'true');
+    champion.append(trophy, teamLogo(bracket.champion), node('div', '', `${bracket.champion.name} \u00b7 NBA Champions`));
     container.append(champion);
   }
   container.append(node('p', 'playoff-legend', 'First round \u2192 Conference semifinals \u2192 Conference finals \u2192 NBA Finals. Numbers beside teams are series wins. Play-in games are not included.'));
@@ -378,10 +762,364 @@ function renderPlayoffs() {
   renderNotice();
 }
 
+const playerResponses = new Map();
+const players = {
+  path: '', loading: false, error: '', sort: { key: 'pts', dir: 'desc' }, expanded: '',
+  timer: 0, controller: null, presentation: '',
+};
+const PLAYER_COLUMNS = [
+  ['gp', 'GP', 'Games played'], ['min', 'MIN', 'Minutes per game'], ['pts', 'PTS', 'Points per game'],
+  ['reb', 'REB', 'Rebounds per game'], ['ast', 'AST', 'Assists per game'], ['stl', 'STL', 'Steals per game'],
+  ['blk', 'BLK', 'Blocks per game'], ['fgPct', 'FG%', 'Field-goal percentage'],
+  ['tpPct', '3P%', 'Three-point percentage'], ['ftPct', 'FT%', 'Free-throw percentage'],
+];
+const LEADERS = [['pts', 'Points', 'PPG'], ['reb', 'Rebounds', 'RPG'], ['ast', 'Assists', 'APG'], ['blk', 'Blocks', 'BPG']];
+
+function playersPath() {
+  return state.view === 'favorite' && state.favorite
+    ? `/api/players?team=${encodeURIComponent(state.favorite)}&season=${state.season}&phase=${state.phase}` : '';
+}
+
+function playerPhoto(player, size = 'small') {
+  const initials = player.name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('');
+  const photo = node('span', `player-photo ${size}`, initials);
+  photo.setAttribute('aria-hidden', 'true');
+  if (!player.headshot || failedLogos.get(player.headshot) > Date.now()) return photo;
+  const image = node('img');
+  image.alt = '';
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  image.addEventListener('load', () => photo.classList.add('photo-loaded'), { once: true });
+  image.addEventListener('error', () => {
+    failedLogos.set(player.headshot, Date.now() + 5 * MINUTE);
+    image.remove();
+  }, { once: true });
+  image.src = player.headshot;
+  photo.append(image);
+  return photo;
+}
+
+function statText(stats, key) {
+  const value = stats?.[key];
+  if (value === undefined || value === null) return '\u2014';
+  if (key.endsWith('Pct')) return stats[key.replace('Pct', 'a')] === 0 && key !== 'fgPct' ? '\u2014' : value.toFixed(1);
+  return key === 'gp' ? String(value) : value.toFixed(1);
+}
+
+function experienceText(years) {
+  if (years === null || years === undefined) return '\u2014';
+  return years === 0 ? 'Rookie' : `${years} ${years === 1 ? 'season' : 'seasons'}`;
+}
+
+function sortedPlayers(list) {
+  const { key, dir } = players.sort;
+  const direction = dir === 'asc' ? 1 : -1;
+  return [...list].sort((a, b) => {
+    if (key === 'name') return direction * a.name.localeCompare(b.name);
+    if (key === 'jersey') return direction * ((Number(a.jersey) || 999) - (Number(b.jersey) || 999));
+    const left = a.stats?.[key];
+    const right = b.stats?.[key];
+    // Players without stats always sink to the bottom, whichever direction is chosen.
+    if (left === undefined || right === undefined) return (left === undefined) - (right === undefined);
+    return direction * (left - right) || a.name.localeCompare(b.name);
+  });
+}
+
+function countUp(element, value, decimals) {
+  element.textContent = value.toFixed(decimals);
+  if (!motionEnabled()) return;
+  const start = performance.now();
+  const step = (time) => {
+    const progress = Math.min(1, (time - start) / 700);
+    element.textContent = (value * (1 - (1 - progress) ** 3)).toFixed(decimals);
+    if (progress < 1 && element.isConnected && motionEnabled()) requestAnimationFrame(step);
+    else element.textContent = value.toFixed(decimals);
+  };
+  requestAnimationFrame(step);
+}
+
+function playerDetails(player, id) {
+  const panel = node('div', 'player-details');
+  panel.id = id;
+  const bio = node('dl', 'player-bio');
+  const facts = [
+    ['Position', player.positionName || player.position || '\u2014'],
+    ['Age', player.age ?? '\u2014'],
+    ['Height', player.height || '\u2014'],
+    ['Weight', player.weight || '\u2014'],
+    ['Experience', experienceText(player.experience)],
+    ['College', player.college || '\u2014'],
+    ['Born', player.birthPlace || '\u2014'],
+    ['Status', player.injury ? `${player.injury.status} (injury)` : player.status],
+  ];
+  for (const [label, value] of facts) {
+    const item = node('div');
+    item.append(node('dt', '', label), node('dd', '', String(value)));
+    bio.append(item);
+  }
+  panel.append(bio);
+  const stats = player.stats;
+  if (stats) {
+    const shooting = node('div', 'player-shooting');
+    for (const [label, made, attempts, pct] of [
+      ['Field goals', 'fgm', 'fga', 'fgPct'], ['Three-pointers', 'tpm', 'tpa', 'tpPct'], ['Free throws', 'ftm', 'fta', 'ftPct'],
+    ]) {
+      const row = node('div', 'shooting-row');
+      const meter = node('span', 'shooting-meter');
+      const fill = node('span');
+      fill.style.setProperty('--pct', `${Math.min(100, stats[pct] || 0)}%`);
+      meter.append(fill);
+      row.append(node('span', 'shooting-label', label), meter,
+        node('span', 'shooting-value', `${statText(stats, made)}\u2013${statText(stats, attempts)} \u00b7 ${statText(stats, pct)}%`));
+      shooting.append(row);
+    }
+    const totals = node('div', 'player-totals');
+    for (const [label, value] of [
+      ['Total PTS', stats.totalPts], ['Total REB', stats.totalReb], ['Total AST', stats.totalAst],
+      ['TOV', stats.tov?.toFixed(1)], ['Fouls', stats.pf?.toFixed(1)], ['Double-doubles', stats.dd], ['Triple-doubles', stats.td],
+    ]) {
+      const item = node('div', 'total-item');
+      item.append(node('strong', '', String(value ?? '\u2014')), node('span', '', label));
+      totals.append(item);
+    }
+    panel.append(shooting, totals);
+  } else {
+    panel.append(node('p', 'player-empty', state.phase === '1'
+      ? 'The data feed does not publish preseason player stats.'
+      : 'No games played in this season and phase yet.'));
+  }
+  const link = node('a', 'player-link', 'Full profile on ESPN \u2197');
+  link.href = `https://www.espn.com/nba/player/_/id/${encodeURIComponent(player.id)}`;
+  link.target = '_blank';
+  link.rel = 'noreferrer';
+  panel.append(link);
+  return panel;
+}
+
+function renderRoster() {
+  const section = $('#roster');
+  const path = playersPath();
+  section.hidden = !path;
+  if (!path) {
+    section.replaceChildren();
+    return;
+  }
+  const data = playerResponses.get(path);
+  section.setAttribute('aria-busy', String(players.loading && !data));
+  const header = node('div', 'roster-header');
+  const titles = node('div');
+  const heading = node('h2', '', 'The roster');
+  heading.id = 'roster-heading';
+  const seasonLabel = `${Number(state.season) - 1}\u2013${state.season.slice(-2)}`;
+  const phaseLabel = { 1: 'preseason', 2: 'regular-season', 3: 'playoff' }[state.phase];
+  titles.append(heading, node('p', 'roster-subtitle',
+    `Current roster \u00b7 ${seasonLabel} ${phaseLabel} averages${data?.coach ? ` \u00b7 Head coach ${data.coach}` : ''}`));
+  header.append(titles, node('span', 'roster-count', data ? `${data.players.length} PLAYERS` : ''));
+  const content = [header];
+  const warning = players.error || data?.meta.warning;
+  if (warning) content.push(node('p', 'roster-warning', warning));
+  if (!data) {
+    if (players.loading) {
+      const skeleton = node('div', 'roster-skeleton');
+      for (let i = 0; i < 6; i += 1) skeleton.append(node('span'));
+      content.push(skeleton);
+    }
+    section.replaceChildren(...content);
+    return;
+  }
+  const withStats = data.players.filter((player) => player.stats?.gp);
+  if (withStats.length) {
+    const leaders = node('div', 'roster-leaders');
+    for (const [key, label, unit] of LEADERS) {
+      const leader = withStats.reduce((best, player) => (player.stats[key] > best.stats[key] ? player : best));
+      const card = node('button', 'leader-card');
+      card.type = 'button';
+      card.dataset.player = leader.id;
+      card.setAttribute('aria-label', `${label} leader: ${leader.name}, ${leader.stats[key].toFixed(1)} ${unit}. Show details.`);
+      const value = node('strong', 'leader-value');
+      value.dataset.value = leader.stats[key];
+      value.textContent = leader.stats[key].toFixed(1);
+      const info = node('span', 'leader-info');
+      info.append(node('span', 'eyebrow', `${label.toUpperCase()} LEADER`), node('span', 'leader-name', leader.shortName),
+        node('span', 'leader-unit', unit));
+      card.append(playerPhoto(leader, 'large'), info, value);
+      leaders.append(card);
+    }
+    content.push(leaders);
+  }
+  const scroller = node('div', 'roster-scroll');
+  scroller.tabIndex = 0;
+  scroller.setAttribute('aria-label', 'Roster table, scroll horizontally for more stats');
+  const table = node('table', 'roster-table');
+  table.append(node('caption', 'sr-only',
+    `${data.team.name} roster with ${seasonLabel} ${phaseLabel} per-game averages. Choose a player for details.`));
+  const head = node('thead');
+  const headings = node('tr');
+  for (const [key, label, description] of [['name', 'Player', 'Player name'], ...PLAYER_COLUMNS]) {
+    const cell = node('th', key === 'name' ? 'roster-player-head' : '');
+    cell.scope = 'col';
+    const active = players.sort.key === key;
+    if (active) cell.setAttribute('aria-sort', players.sort.dir === 'asc' ? 'ascending' : 'descending');
+    const button = node('button', `sort-button${active ? ' active' : ''}`, label);
+    button.type = 'button';
+    button.dataset.sort = key;
+    button.title = `Sort by ${description.toLowerCase()}`;
+    if (active) button.append(node('span', 'sort-arrow', players.sort.dir === 'asc' ? '\u25b2' : '\u25bc'));
+    cell.append(button);
+    headings.append(cell);
+  }
+  head.append(headings);
+  const body = node('tbody');
+  for (const player of sortedPlayers(data.players)) {
+    const expanded = players.expanded === player.id;
+    const row = node('tr', `player-row${expanded ? ' expanded' : ''}${player.injury ? ' injured' : ''}`);
+    const nameCell = node('th', 'roster-player');
+    nameCell.scope = 'row';
+    const toggle = node('button', 'player-toggle');
+    toggle.type = 'button';
+    toggle.dataset.player = player.id;
+    toggle.setAttribute('aria-expanded', String(expanded));
+    const detailId = `player-details-${player.id}`;
+    toggle.setAttribute('aria-controls', detailId);
+    const identity = node('span', 'player-identity');
+    identity.append(node('span', 'player-name', player.name),
+      node('span', 'player-meta', [player.jersey && `#${player.jersey}`, player.position].filter(Boolean).join(' \u00b7 ')));
+    toggle.append(playerPhoto(player), identity);
+    if (player.injury) {
+      const badge = node('span', 'injury-badge', player.injury.status);
+      badge.title = `Injury status: ${player.injury.status}`;
+      toggle.append(badge);
+    }
+    nameCell.append(toggle);
+    row.append(nameCell);
+    for (const [key] of PLAYER_COLUMNS) {
+      row.append(node('td', players.sort.key === key ? 'sorted' : '', statText(player.stats, key)));
+    }
+    body.append(row);
+    if (expanded) {
+      const detailRow = node('tr', 'player-detail-row');
+      const cell = node('td');
+      cell.colSpan = PLAYER_COLUMNS.length + 1;
+      cell.append(playerDetails(player, detailId));
+      detailRow.append(cell);
+      body.append(detailRow);
+    }
+  }
+  table.append(head, body);
+  scroller.append(table);
+  content.push(scroller,
+    node('p', 'roster-source', `Stats: per game \u00b7 one shared league-wide request covers every team \u00b7 Updated ${timeFormatter.format(new Date(data.meta.fetchedAt))}`));
+  const focused = document.activeElement?.closest?.('#roster [data-player], #roster [data-sort]');
+  // Re-rendering replaces nodes; keep keyboard focus on the equivalent control.
+  const focusKey = focused && (focused.dataset.sort ? `[data-sort="${focused.dataset.sort}"]`
+    : `${focused.classList.contains('leader-card') ? '.leader-card' : '.player-toggle'}[data-player="${focused.dataset.player}"]`);
+  section.replaceChildren(...content);
+  if (focusKey) section.querySelector(focusKey)?.focus({ preventScroll: true });
+  animateRoster(path);
+}
+
+function animateRoster(path) {
+  if (players.presentation === path) return;
+  players.presentation = path;
+  rosterObserver?.disconnect();
+  const section = $('#roster');
+  section.querySelectorAll('.leader-value').forEach((value) => countUp(value, Number(value.dataset.value), 1));
+  if (!motionEnabled()) return;
+  const items = [...section.querySelectorAll('.leader-card, .player-row')];
+  rosterObserver = new IntersectionObserver((entries, observer) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      observer.unobserve(entry.target);
+      if (!motionEnabled()) continue;
+      entry.target.animate([
+        { opacity: 0, transform: 'translateY(14px)' }, { opacity: 1, transform: 'translateY(0)' },
+      ], { duration: 420, delay: (items.indexOf(entry.target) % 10) * 40, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards' });
+    }
+  }, { threshold: 0.05 });
+  items.forEach((item) => rosterObserver.observe(item));
+}
+
+async function loadPlayers() {
+  clearTimeout(players.timer);
+  const path = playersPath();
+  if (path !== players.path) {
+    players.controller?.abort();
+    players.loading = false;
+    players.error = '';
+    players.expanded = '';
+    players.presentation = '';
+    players.path = path;
+  }
+  if (!path || players.loading) {
+    renderRoster();
+    return;
+  }
+  const cached = playerResponses.get(path);
+  const schedule = (at) => {
+    if (!document.hidden) players.timer = setTimeout(loadPlayers, Math.min(2_147_000_000, Math.max(15_000, at - Date.now())));
+  };
+  if (cached && !cached.meta.stale && cached.meta.expiresAt > Date.now()) {
+    renderRoster();
+    schedule(cached.meta.nextRefreshAt);
+    return;
+  }
+  players.loading = true;
+  renderRoster();
+  players.controller = new AbortController();
+  try {
+    const result = await api(path, players.controller.signal);
+    if (players.path !== path) return;
+    playerResponses.delete(path);
+    playerResponses.set(path, result);
+    while (playerResponses.size > 12) playerResponses.delete(playerResponses.keys().next().value);
+    players.error = '';
+    renderUsage(result.meta.usage);
+    schedule(result.meta.nextRefreshAt);
+  } catch (error) {
+    if (error.name === 'AbortError' || players.path !== path) return;
+    console.error('Unable to load the roster:', error);
+    players.error = `${error.message} We will retry automatically.`;
+    schedule(Math.max(error.retryAt || 0, Date.now() + MINUTE));
+  } finally {
+    if (players.path === path) {
+      players.loading = false;
+      renderRoster();
+    }
+  }
+}
+
+$('#roster').addEventListener('click', (event) => {
+  const sort = event.target.closest('[data-sort]');
+  if (sort) {
+    const key = sort.dataset.sort;
+    players.sort = players.sort.key === key
+      ? { key, dir: players.sort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: key === 'name' ? 'asc' : 'desc' };
+    renderRoster();
+    return;
+  }
+  const target = event.target.closest('[data-player]');
+  if (!target) return;
+  const leader = target.classList.contains('leader-card');
+  players.expanded = players.expanded === target.dataset.player && !leader ? '' : target.dataset.player;
+  renderRoster();
+  if (leader) {
+    const row = $(`#roster .player-toggle[data-player="${target.dataset.player}"]`);
+    row?.focus({ preventScroll: true });
+    row?.closest('tr').scrollIntoView({ block: 'center', behavior: motionEnabled() ? 'smooth' : 'auto' });
+  }
+});
+
 function renderGames() {
+  renderContent();
+  animateContent();
+}
+
+function renderContent() {
   const grid = $('#games');
   const standings = state.view === 'standings';
   const playoffs = standings && state.standingsView === 'playoffs';
+  if (!standings || playoffs) hideHistory();
   grid.hidden = standings;
   $('#standings').hidden = !standings || playoffs;
   $('#playoffs').hidden = !playoffs;
@@ -465,11 +1203,13 @@ function pathForView() {
 async function loadGames() {
   clearTimeout(timer);
   requestController?.abort();
+  void loadPlayers();
   const requestId = ++state.requestId;
   const path = pathForView();
   state.error = '';
   state.retryAt = 0;
   state.loading = false;
+  state.scoreChanges = new Set();
   const cached = path && localResponses.get(path);
   state.games = cached?.games || [];
   state.conferences = cached?.conferences || [];
@@ -494,6 +1234,19 @@ async function loadGames() {
   try {
     const result = await api(path, requestController.signal);
     if (requestId !== state.requestId) return;
+    if (cached?.games && result.games && !result.meta.stale) {
+      const previous = new Map(cached.games.map((game) => [game.id, game]));
+      for (const game of result.games) {
+        const old = previous.get(game.id);
+        if (!old || old.state === 'scheduled' || game.state === 'scheduled') continue;
+        for (const side of ['home', 'away']) {
+          if (game[side].score !== null && old[side].score !== null
+            && game[side].score !== old[side].score) {
+            state.scoreChanges.add(`${game.id}:${game[side].id}`);
+          }
+        }
+      }
+    }
     localResponses.delete(path);
     localResponses.set(path, result);
     while (localResponses.size > 48) localResponses.delete(localResponses.keys().next().value);
@@ -645,10 +1398,14 @@ $('#next-day').addEventListener('click', () => shiftDate(1));
 $('#today-button').addEventListener('click', () => changeDate(easternToday()));
 
 document.addEventListener('visibilitychange', () => {
+  document.body.classList.toggle('page-hidden', document.hidden);
   if (document.hidden) {
     clearTimeout(timer);
+    clearTimeout(players.timer);
     requestController?.abort();
+    document.getAnimations().forEach((animation) => animation.pause());
   } else {
+    if (motionEnabled()) document.getAnimations().forEach((animation) => animation.play());
     if (state.teamError) void loadTeams();
     void loadGames();
   }
@@ -673,6 +1430,7 @@ window.addEventListener('pagehide', () => {
   clearTimeout(timer);
   clearTimeout(midnightTimer);
   requestController?.abort();
+  revealObserver?.disconnect();
 });
 window.addEventListener('pageshow', (event) => {
   if (event.persisted) {

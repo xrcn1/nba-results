@@ -16,6 +16,39 @@ the preceding matchups; unknown teams remain **TBD**, never projected from curre
 standings. Play-in games are excluded. Before the postseason is announced, choose
 a previous season (for example 2025–26) to see a completed bracket.
 
+**Last 20 games:** hover over a team name in Standings, or focus it with the
+keyboard or tap it on mobile, to see that team's last 20 completed games, newest
+first. Each game shows its date, opponent (vs = home, @ = away), W/L, the score
+with the selected team first, and **Reg** or **OT**, **2OT**, and so on. The card
+also shows the overall record, current streak, an oldest-to-newest win/loss strip,
+and a **PO** tag on playoff games. Press Escape or move away to close it.
+
+**Players (My team):** below your team's games, **The roster** lists every current
+player with a headshot, jersey number, position, and injury badge, plus the head
+coach. Leader cards highlight the top scorer, rebounder, passer, and shot-blocker.
+The table shows GP, MIN, PTS, REB, AST, STL, BLK, FG%, 3P%, and FT% for the selected
+season and phase. Click a column header to sort, or click a player (or a leader card)
+to expand their bio (age, height, weight, experience, college, birthplace, status),
+shooting splits with made–attempted per game, season totals, and an ESPN profile link.
+ESPN only publishes the *current* roster, so past seasons show today's players with
+that season's stats (blank for players who were elsewhere). Preseason stats aren't
+published by the feed.
+
+## Motion and visual details
+
+Cards and standings rows reveal with a short stagger as they enter the viewport.
+Playoff cards have animated series-win markers, and the champion gets a trophy
+entrance. Subtle court markings, brief arena-light sweeps, hover lifts, and
+score-change highlights add movement without changing data refresh rates.
+Score highlights only mark actual changes between fetched results, not initial
+scores or scheduled games.
+
+Use **Motion: on/off** in the top bar to disable decorative movement; the choice
+is saved in this browser. The app always honors the system's reduced-motion
+preference. Animations pause in hidden tabs, reveals run only when the view changes
+(not on every background refresh), and decorative effects finish within five
+seconds. No animation libraries, external assets, or additional API calls are needed.
+
 ## Run
 
 Requires **Node.js 22 or newer**. No packages, API keys, accounts, or build step.
@@ -66,6 +99,15 @@ could quietly spend someone else's quota. Data failures are visible in the inter
   recheck before tip-off so a long-lived cache cannot hide the start of a game.
 - Team schedules: **15 minutes**, or **2 minutes** while live/near tip-off.
 - Team directory: **7 days**.
+- Last 20 games (Standings hover): loaded only after a short hover-intent delay,
+  then cached on the server and in the browser so re-hovering costs nothing. Season
+  sources are read newest first and only while fewer than 20 games are available:
+  the current regular season, its playoffs once the regular season ends, then the
+  previous season's playoffs and regular season. Usually 1–3 requests per team.
+  The server stores only compact results. The current season follows the schedule
+  TTLs; finished past seasons are cached for **30 days**. If the shared limit is
+  hit mid-load, available games are shown with a warning and the rest are retried
+  on a later hover.
 - Standings: **30 minutes**, fetching both conferences in one shared request,
   only when the Standings tab is in use. Uses the same budget and stale/error handling.
 - Playoffs: **one annual scoreboard request** per selected season, explicitly
@@ -79,6 +121,24 @@ could quietly spend someone else's quota. Data failures are visible in the inter
   persist across restarts, and do not consume sports-data API calls. Only the 30
   known NBA team paths are allowed. Failures pause image retries for five minutes.
   If an image cannot load, the team abbreviation remains visible with an explanatory tooltip.
+- Players: one **league-wide stats request** (all ~470 players, reduced on the
+  server from ~6 MB to a ~120 KB compact map) is shared by every team, plus one
+  roster request per team. The first team costs 2 calls; each additional team costs
+  only its roster. Rosters are cached **12 hours**; current-season stats **3 hours**;
+  finished seasons **30 days**. If stats are unavailable, the roster still appears
+  with a warning and stats fill in on a later refresh.
+- Player headshots use the same local image proxy as logos (only numeric player IDs,
+  ~10 KB resized images, **30-day** disk/browser cache, bounded memory LRU). Players
+  with no ESPN photo are not rechecked for a day; initials are shown instead.
+- **Priority lanes:** background extras (the Standings hover history) can't use the
+  last request slot in the current minute or the last 20% of the daily budget, so the
+  visible view's live refreshes always have headroom.
+- **Saver mode:** cache lifetimes stretch automatically as the day's budget is used
+  (×1.5 at 50%, ×2 at 75%, ×4 at 90%), so the budget lasts until the UTC reset.
+- Identical upstream URLs are fetched once even when different features need them,
+  and the hover history reuses an already-fresh team schedule with zero calls.
+- The usage meter tooltip shows today's calls per data type (scoreboard, schedule,
+  roster, player-stats, ...), and the label shows when saver mode is active.
 - Hard shared cap: **4 upstream requests per rolling minute**, **300 per UTC day**.
   These are our safety limits, not claims about ESPN's quota.
 - Requests, including failed requests, count against the budget. Fresh cache reads do not.
@@ -125,4 +185,5 @@ Tests use Node's built-in test runner and mocked provider responses: exact cache
 lifetimes, in-flight deduplication, rolling and daily limits, UTC reset,
 429/backoff handling, stale/error behavior, persistence, normalization, query
 validation, standings conference/rank/stat handling and cache limits, logo URL
-coverage for all 30 teams, and local HTTP routing. They consume **zero provider requests**.
+coverage for all 30 teams, last-20 overtime/merge/partial-budget logic, roster/stats
+normalization and joins, priority lanes, saver-mode TTLs, headshot validation, and local HTTP routing. They consume **zero provider requests**.

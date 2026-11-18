@@ -32,7 +32,7 @@
       </div>
     </aside>
     <main>
-      <header class="topbar"><span>THE NATIONAL BASKETBALL ASSOCIATION</span><span id="today-label"></span></header>
+      <header class="topbar"><span>THE NATIONAL BASKETBALL ASSOCIATION</span><div class="topbar-actions"><button id="motion-toggle" class="motion-toggle" type="button" aria-pressed="true">Motion: on</button><span id="today-label"></span></div></header>
       <section class="page-heading">
         <div><p class="eyebrow">EVERY GAME. EVERY NIGHT.</p><h1 id="page-title">Around the league<span>.</span></h1>
           <p id="page-description">The scores you came for. The matchups you don't want to miss.</p>
@@ -73,6 +73,7 @@
       <section id="games" class="game-grid" aria-label="NBA games" aria-busy="true"></section>
       <section id="standings" class="standings-grid" aria-label="NBA conference standings" aria-busy="false" hidden></section>
       <section id="playoffs" class="playoff-bracket" aria-label="NBA playoff bracket" aria-busy="false" hidden></section>
+      <section id="roster" class="roster" aria-labelledby="roster-heading" aria-busy="false" hidden></section>
       <section class="empty-state" id="empty-state" hidden><span aria-hidden="true">&#9678;</span><h2 id="empty-title">No games on the board</h2><p id="empty-description">Try another date or filter.</p></section>
       <footer>
         <div><span class="cache-dot"></span><span id="refresh-status" role="status">Connecting to the court...</span><span id="updated-at"></span></div>
